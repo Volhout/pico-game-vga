@@ -1,0 +1,110 @@
+'PIONES - PIO SPI for NES controller
+
+'PIONES is software that runs on the RP2040 PIO state machines to read from
+'NES controllers (SPI). This is indenpendent of the 2 ARM cores.
+'For VGA picomite PIO 0 is used to generate VGA. PIO 1 is used for PIONES
+
+'-------------------------------- IO pin configuration -------------------------
+'VGApicomiteGAME board revision 1.4
+
+'pin asignment   Port A/K8/sm0       Port B/K7/sm1
+'data (in)         gp1                  gp4
+'latch (out)       gp2                  gp5
+'clk (out)         gp3                  gp22
+
+
+'--------------------------------- PIO configuration --------------------------
+'note: the PIO program for both PIO statemachines is the same, the IO definition
+'in the pinctrl register is different. The statemachines actually run same code
+
+'PIO1 execute frequency (identical for all state machines)
+f=100000
+
+'PIO1 shift register control (identical for all state machines)
+s=2^19                            'set bit 19 = IN shift left, OUT shift right
+
+'PIO1 sm0 config
+'When your NES controller is connected to different pins, adapt below 4 lines.
+SetPin gp1,pio1 'data
+SetPin gp2,pio1 'latch
+SetPin gp3,pio1 'clock
+p0=Pio(pinctrl 1,1,1,gp1,gp3,gp2,gp3)   'GP1=IN base GP2=SET GP3=OUT/SIDESET
+'                     ^   ^   ^   ^
+'                     |   |   |   +---- clock pin
+'                     |   |   +-------- latch pin
+'                     |   +------------ clock pin (second definition of same pin)
+'                     +---------------- data pin
+
+'PIO1 sm1 config
+'When your 2nd NES controller connects to different pins, adapt below 4 lines.
+SetPin gp4,pio1 'data
+SetPin gp5,pio1 'latch
+SetPin gp22,pio1 'clock
+p1=Pio(pinctrl 1,1,1,gp4,gp22,gp5,gp22) 'GP4=IN base, GP5=SET GP22=OUT/SIDESET
+'                     ^   ^   ^   ^
+'                     |   |   |   +---- clock pin
+'                     |   |   +-------- latch pin
+'                     |   +------------ clock pin (second definition of same pin)
+'                     +---------------- data pin
+
+
+'------------------------------ PIO program (comment) -------------------------
+'pio1 sm0 program, identical code for sm0 and sm1, clock is side set pin
+'adr/instr/comment
+'0 E081 'set pindir latch, out     [side 0]
+'1 E000 'set latch low             [side 0]
+'2 A0EB 'MOV null inverted to OSR  [side 0] OSR = &hffffffff
+'3 6081 'OUT 1 bit OSR to pindirs  [side 0] set clock to output (pindir = 1)
+
+'4 E001 'latch high                [side 0] latch pulse
+'5 E000 'latch low                 [side 0]
+'6 E027 'load X with value 7       [side 0] counter for bits shifted in
+'7 A0C3 'mov NULL to ISR           [side 0] clear shift register
+
+'8 4001 'shift 1 bit data in ISR   [side 0] adress 8 and 9 are the shift in loop
+'9 1048 'JMP X-- to &h8            [side 1] this is the clock pulse
+'A 8000 'push ISR                  [side 0] 8 bits to fifo
+'B 0004 'jmp to &h4                [side 0] next cycle
+
+'&h0C....&h1F not used
+'------------------------- END PIO program (comment) --------------------------
+
+
+'-------------------------------- START PIO 1 ---------------------------------
+
+'PIO1 program (hex data values are from above listing)
+Dim a%(7)=(&h6081A0EBE000E081,&hA0C3E027E000E001,&h0004800010484001,0,0,0,0,0)
+
+'program and start the PIO1 state machines
+PIO program 1,a%()                    'program PIO1
+PIO init machine 1,0,f,p0,,s,0        'init sm0 from address &h00
+PIO init machine 1,1,f,p1,,s,0        'init sm1 from address &h00 (run same code)
+PIO start 1,0                         'start PIO1 sm0
+PIO start 1,1                         'start PIO1 sm1
+
+Print "PIO 1 running"
+
+
+
+'------------------------------ MAIN level test code -----------------------------
+dim h%(4)   'read PIO fifo's to this array
+
+'power the 2 ports K8 and K7 only if needed by hardware platform
+SetPin gp14,dout:Pin(gp14)=1
+SetPin gp15,dout:Pin(gp15)=1
+
+
+'read the FIFO's that contain the NES controller keys
+'  the FIFO's are 4 levels deep, are autonomously filled from the statemachines
+'  when full, new data is refused. To get the latest NES controller status, read 4
+'  old fifo values, the 5'th values is just entered in the fifo, and is actual.
+
+Do
+ PIO read 1,0,5,h%()    'read 5 values (h%(0...4)) from FIFO sm0
+ Print Hex$(255-h%(4)), 'print actual (h%(4)) value inverted (switches pull down)
+ PIO read 1,1,5,h%()    'read 5 values (h%(0...4)) from FIFO sm1
+ Print Hex$(255-h%(4))  'print actual (h%(4)) value inverted (switches pull down)
+ Pause 100
+Loop While Inkey$=""
+
+End
